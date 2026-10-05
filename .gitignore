@@ -1,0 +1,19 @@
+# Local tooling (linters installed with pip into a venv), editors, OS files
+.venv/
+__pycache__/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Anything downloaded next to the CA bundle for a local enterprise build is never committed;
+# the demo bundle (docker/ca/demo-root-ca.pem) is.
+docker/ca/*.pem
+!docker/ca/demo-root-ca.pem
+*.key
+*.p12
+*.jks
+
+# Local env files
+*.local.env
