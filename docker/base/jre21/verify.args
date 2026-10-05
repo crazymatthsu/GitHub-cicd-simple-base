@@ -1,0 +1,8 @@
+# Arguments of scripts/ci/verify-image.sh for this image: what jre21 promises, checked from the outside
+# before it is pushed (shell quoting, one or more lines, `#` comments). The CA checks are always on.
+--kind runtime
+--check 'java -version'
+--check 'curl --version'
+--check 'test -d /app && test -d /config && test -w /app/logs'
+--check 'test "$TZ" = UTC'
+--tls-url https://github.com

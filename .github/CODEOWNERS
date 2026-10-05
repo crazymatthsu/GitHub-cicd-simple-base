@@ -1,0 +1,21 @@
+# CODEOWNERS (D12 §6.10 of the platform design in github-demo). The ruleset on main requires a pull request
+# with one approval; these rules decide who is asked.
+#
+# Demo: @crazymatthsu stands in for every team. The comment above each rule names the team that owns the
+# path in the enterprise (organisation placeholder: @example). The LAST matching pattern wins.
+
+# Everything — platform team (@example/platform-team)
+*                       @crazymatthsu
+
+# The base images and their toolchains — platform team (@example/platform-team)
+/docker/base/           @crazymatthsu
+
+# The CA bundle — platform team + security (@example/platform-team @example/security)
+/docker/ca/             @crazymatthsu
+
+# Workflows, actions, scripts — platform team (@example/platform-team)
+/.github/               @crazymatthsu
+/scripts/               @crazymatthsu
+/renovate.json          @crazymatthsu
+/.hadolint.yaml         @crazymatthsu
+/platform.yml           @crazymatthsu

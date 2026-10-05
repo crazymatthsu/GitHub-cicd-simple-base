@@ -1,0 +1,145 @@
+# Pull-request pipeline of the base-image repository (D7 §5.6 pattern; DL-47):
+#   push to a branch   lint only (hadolint, ShellCheck, script tests, actionlint); gate reported as `push-gate`
+#   pull_request       lint + build and verify every image under docker/base/ WITHOUT pushing (_build-image.yml)
+# `pr-gate` fans everything in and is the ONLY required status check on `main`. A change that would break an
+# image (Dockerfile, toolchain pin, CA bundle, verify.args) is found here, before base-image.yml publishes it
+# on merge.
+name: pr
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    # The matrix is the tree: one entry per docker/base/<name>/Dockerfile (nothing is declared twice).
+    name: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          set -euo pipefail
+          matrix=$(find docker/base -mindepth 2 -maxdepth 2 -name Dockerfile -printf '%h\n' | xargs -n1 basename | sort | jq -R . | jq -sc .)
+          [[ $matrix != '[]' ]] || { echo "::error::no docker/base/<name>/Dockerfile found"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "images: $matrix"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install linters (pinned)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/lint"
+          "$RUNNER_TEMP/lint/bin/pip" install --quiet --disable-pip-version-check \
+            hadolint-bin==2.15.1 shellcheck-py==0.11.0.1 actionlint-py==1.7.12.25
+          echo "$RUNNER_TEMP/lint/bin" >> "$GITHUB_PATH"
+
+      - name: hadolint (Dockerfiles, .hadolint.yaml)
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files -- 'Dockerfile' '**/Dockerfile')
+          [[ ${#files[@]} -gt 0 ]] || { echo "::error::no Dockerfile tracked"; exit 1; }
+          hadolint --config .hadolint.yaml "${files[@]}"
+
+      - name: ShellCheck (shell scripts)
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files -- '*.sh')
+          shellcheck --severity=warning "${files[@]}"
+
+      - name: Every image declares its checks (verify.args parses)
+        run: |
+          set -euo pipefail
+          for dockerfile in docker/base/*/Dockerfile; do
+            dir=$(dirname "$dockerfile")
+            [[ -s $dir/verify.args ]] || { echo "::error::$dir/verify.args is missing or empty"; exit 1; }
+            mapfile -t args < <(grep -v '^[[:space:]]*#' "$dir/verify.args" | xargs printf '%s\n' | sed '/^$/d')
+            [[ ${#args[@]} -gt 0 ]] || { echo "::error::$dir/verify.args holds no arguments"; exit 1; }
+            echo "$dir: verify-image.sh ${args[*]}"
+          done
+
+      - name: Script tests (stubbed docker, throwaway CA; no engine, no network)
+        run: |
+          set -euo pipefail
+          for test in scripts/test/*-test.sh; do
+            echo "::group::$test"
+            bash "$test"
+            echo "::endgroup::"
+          done
+
+      - name: actionlint (workflows, with ShellCheck on run blocks)
+        run: actionlint -no-color
+
+  build:
+    # Build and verify every image exactly as base-image.yml will, without pushing.
+    needs: images
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.images.outputs.matrix) }}
+    uses: ./.github/workflows/_build-image.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      image: ${{ matrix.image }}
+      push: false
+
+  pr-gate:
+    # A plain branch push reports `push-gate`: its lint-only result lands on the same head SHA as the PR run
+    # and must never satisfy (or mask) the required `pr-gate` check.
+    name: ${{ github.event_name == 'push' && 'push-gate' || 'pr-gate' }}
+    if: always()
+    needs: [images, lint, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fan in
+        env:
+          EVENT: ${{ github.event_name }}
+          IMAGES_RESULT: ${{ needs.images.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          MATRIX: ${{ needs.images.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          fail=0
+          {
+            echo "### ${EVENT}: gate"
+            echo ""
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "| images | $IMAGES_RESULT |"
+            echo "| lint | $LINT_RESULT |"
+            echo "| build + verify | $BUILD_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ $IMAGES_RESULT == success ]] || { echo "::error::images: $IMAGES_RESULT"; fail=1; }
+          [[ $LINT_RESULT == success ]] || { echo "::error::lint: $LINT_RESULT"; fail=1; }
+          if [[ $EVENT == pull_request ]]; then
+            [[ $BUILD_RESULT == success ]] || { echo "::error::build + verify: $BUILD_RESULT"; fail=1; }
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Images built and verified, not pushed: \`$MATRIX\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Branch push: lint only; the pull request builds and verifies the images." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$fail"

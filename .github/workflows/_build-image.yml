@@ -1,0 +1,146 @@
+# Reusable: build, verify and (optionally) publish ONE company base image (D3 §6.1–§6.3, DL-13, DL-28; DL-47).
+#
+#   checkout → tag <yyyymmdd>-<run_number> → [dated tag must not exist] → buildx build (loaded, not pushed)
+#   → scripts/ci/verify-image.sh with docker/base/<image>/verify.args → [push dated tag + latest,
+#   latest must resolve to the dated digest]
+#
+# Called by pr.yml (push: false — a pull request proves the Dockerfile and the CA before anything is
+# published) and by base-image.yml (push: true — main, weekly, manual). The image repository is derived from
+# platform.yml: <registry>/<projects[0].name>/<image>. The build context is the directory holding the CA
+# bundle (docker/ca); the Dockerfile is docker/base/<image>/Dockerfile.
+# The caller grants `packages: write` to publish (`packages: read` is enough for a pull request).
+name: _build-image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Image name, the directory under docker/base/.
+        type: string
+        required: true
+      push:
+        description: Publish the dated tag and latest after the verification passed.
+        type: boolean
+        default: false
+      no-cache:
+        description: Build every layer again (the weekly run; a cached apt layer would republish old packages).
+        type: boolean
+        default: false
+      ca-bundle-version:
+        description: CA bundle version label (rotation, D3 §6.3); empty keeps the Dockerfile default.
+        type: string
+        default: ''
+      context:
+        description: Build context, the directory holding the CA bundle.
+        type: string
+        default: docker/ca
+    outputs:
+      image:
+        description: The published image, <repository>:<tag>@sha256:<digest> ('' when nothing was pushed).
+        value: ${{ jobs.build.outputs.image }}
+      tag:
+        description: The dated tag of this build.
+        value: ${{ jobs.build.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ inputs.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Repository and tag
+        id: tag
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          [[ $IMAGE =~ ^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::image name '$IMAGE' is not a lowercase OCI path segment"; exit 1; }
+          [[ -f docker/base/$IMAGE/Dockerfile ]] || { echo "::error::docker/base/$IMAGE/Dockerfile does not exist"; exit 1; }
+          [[ -s docker/base/$IMAGE/verify.args ]] || { echo "::error::docker/base/$IMAGE/verify.args is missing: every image declares what verify-image.sh checks"; exit 1; }
+          registry=$(yq '.registry // ""' platform.yml)
+          project=$(yq '.projects[0].name // ""' platform.yml)
+          [[ -n $registry && -n $project ]] || { echo "::error::platform.yml needs registry and projects[0].name"; exit 1; }
+          {
+            echo "repo=${registry}/${project}/${IMAGE}"
+            echo "tag=$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/registry-login
+        if: inputs.push
+
+      - name: The dated tag must not exist yet
+        if: inputs.push
+        env:
+          REPO: ${{ steps.tag.outputs.repo }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$REPO:$TAG" >/dev/null 2>&1; then
+            echo "::error::$REPO:$TAG already exists and dated tags are immutable (D3 §6.1): start a new run instead of re-running this one"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (loaded, not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: docker/base/${{ inputs.image }}/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          no-cache: ${{ inputs.no-cache }}
+          tags: |
+            ${{ steps.tag.outputs.repo }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.tag.outputs.repo }}:latest
+          build-args: |
+            IMAGE_VERSION=${{ steps.tag.outputs.tag }}
+            GIT_SHA=${{ github.sha }}
+            CREATED=${{ steps.tag.outputs.created }}
+            ${{ inputs.ca-bundle-version != '' && format('CA_BUNDLE_VERSION={0}', inputs.ca-bundle-version) || '' }}
+          cache-from: type=gha,scope=base-${{ inputs.image }}
+          cache-to: type=gha,scope=base-${{ inputs.image }},mode=max
+
+      - name: Verify from the outside (docker/base/<image>/verify.args)
+        env:
+          IMAGE: ${{ inputs.image }}
+          REF: ${{ steps.tag.outputs.repo }}:${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # verify.args: shell-quoted arguments of scripts/ci/verify-image.sh, `#` lines are comments.
+          mapfile -t args < <(grep -v '^[[:space:]]*#' "docker/base/$IMAGE/verify.args" | xargs printf '%s\n' | sed '/^$/d')
+          [[ ${#args[@]} -gt 0 ]] || { echo "::error::docker/base/$IMAGE/verify.args holds no arguments"; exit 1; }
+          echo "verify-image.sh ${args[*]} $REF"
+          scripts/ci/verify-image.sh "${args[@]}" "$REF"
+
+      - name: Push the dated tag and latest; latest must be the dated digest
+        id: push
+        if: inputs.push
+        env:
+          REPO: ${{ steps.tag.outputs.repo }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker push --quiet "$REPO:$TAG"
+          docker push --quiet "$REPO:latest"
+          pinned=$(scripts/ci/resolve-image.sh "$REPO:$TAG")
+          latest=$(scripts/ci/resolve-image.sh "$REPO:latest")
+          [[ ${pinned#*@} == "${latest#*@}" ]] || { echo "::error::$REPO:latest is ${latest#*@}, not the digest of $TAG (${pinned#*@})"; exit 1; }
+          echo "image=$REPO:$TAG@${pinned#*@}" >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "Published \`$REPO:$TAG\` and \`latest\` → \`${pinned#*@}\`"
+            echo ""
+            echo "Pin it as \`$REPO:$TAG@${pinned#*@}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

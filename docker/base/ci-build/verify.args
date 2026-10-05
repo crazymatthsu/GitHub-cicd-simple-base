@@ -1,0 +1,10 @@
+# Arguments of scripts/ci/verify-image.sh for this image: what ci-build promises, checked from the outside
+# before it is pushed (shell quoting, one or more lines, `#` comments). `--kind ci-build` runs git, docker,
+# docker compose, docker buildx, helm, kubectl, kind, hadolint, shellcheck, yq, jq and crane; the CA checks
+# are always on. A new toolchain gets a `--check '<tool> --version'` line here (docs/toolchains.md).
+--kind ci-build
+--expect-uid 1001
+--check 'java -version'
+--check 'javac -version'
+--check 'test -w /workspace'
+--tls-url https://github.com
