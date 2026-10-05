@@ -1,0 +1,57 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Dependency updates of the base images (D3 §6.3, D10 §6.10 in github-demo). Every tool pin is a Dockerfile ARG under a `# renovate:` hint; the upstream Temurin images are the ARG TEMURIN_IMAGE of each Dockerfile; the workflow actions are pinned by major. No release line here: a merge publishes new dated image tags.",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "timezone": "UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "packageRules": [
+    {
+      "description": "Workflow actions (majors pinned) are CI-only changes.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions",
+      "semanticCommitType": "ci"
+    },
+    {
+      "description": "kind and kubectl track the kind release's default node image; bump them together.",
+      "matchPackageNames": [
+        "kubernetes-sigs/kind",
+        "kubernetes/kubernetes"
+      ],
+      "groupName": "kind and kubectl"
+    },
+    {
+      "description": "The Docker CLI and its compose and buildx plugins come from one apt repository; bump them together.",
+      "matchPackageNames": [
+        "docker/cli",
+        "docker/compose",
+        "docker/buildx"
+      ],
+      "groupName": "Docker CLI"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Tool pins in the Dockerfiles: a `# renovate: datasource=<ds> depName=<name>` hint names the datasource and package of the `ARG <KEY>=<value>` line below it (docs/toolchains.md).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^\\s]+)(?: extractVersion=(?<extractVersion>[^\\s]+))?\\s*\\nARG [A-Z_]+=(?<currentValue>[^\\s]+)"
+      ]
+    }
+  ]
+}

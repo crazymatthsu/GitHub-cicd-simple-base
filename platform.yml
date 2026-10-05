@@ -1,0 +1,8 @@
+# platform.yml — the manifest of this repository for the shared pipeline (D12 §6.6, DL-42 / DL-47 in github-demo):
+# only what the tree cannot derive. The images are derived from docker/base/<name>/Dockerfile and published as
+# <registry>/<project>/<name>:<yyyymmdd>-<run> (and latest); nothing here is deployed.
+platform: v1                        # the platform-ci major this repository follows
+kind: base                          # builds, verifies and publishes the company base images; deploys nothing
+registry: ghcr.io/crazymatthsu      # images are <registry>/<project>/<name>
+projects:
+  - name: github-cicd-simple-base   # the image path; this repository has no release line (tags are dates)

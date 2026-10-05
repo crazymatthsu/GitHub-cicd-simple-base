@@ -1,0 +1,89 @@
+# Company base images (D3 §6.1–§6.3, DL-13, DL-28; D7 §6.1; DL-47 — this repository is their home):
+#   ghcr.io/crazymatthsu/github-cicd-simple-base/jre21:<yyyymmdd>-<run_number>     runtime base of every Java 21 app image
+#   ghcr.io/crazymatthsu/github-cicd-simple-base/ci-build:<yyyymmdd>-<run_number>  JDK 21 build image with the toolchains
+# (the repository is derived from platform.yml; the list of images from docker/base/<name>/Dockerfile).
+# Each image is built and loaded, verified from the outside (scripts/ci/verify-image.sh with the image's
+# verify.args) and only then pushed: first the dated tag, which is never overwritten, then `latest`, which must
+# end up on the same digest — a broken build never moves `latest`. Consumers resolve `latest` to a digest once
+# per run or pin a dated tag (Renovate bumps it).
+#
+# Triggers: a merge to main that changes the images, the CA, the verification or these workflows; weekly,
+# without the layer cache, so OS, JDK and tool patches land even when no file changed; manually, optionally for
+# one image, without cache, or with a new CA bundle version (rotation, D3 §6.3). Pull requests build and verify
+# through pr.yml and push nothing.
+name: base-image
+
+on:
+  schedule:
+    - cron: '23 4 * * 1' # Mondays 04:23 UTC: OS and JRE patches (off the hour on purpose)
+  workflow_dispatch:
+    inputs:
+      image:
+        description: One image (a directory under docker/base/); empty builds every image.
+        type: string
+        default: ''
+      ca-bundle-version:
+        description: CA bundle version label (rotation, D3 §6.3); empty keeps the Dockerfile default.
+        type: string
+        default: ''
+      no-cache:
+        description: Build without the layer cache (the weekly run always does).
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'scripts/ci/**'
+      - 'platform.yml'
+      - '.github/workflows/base-image.yml'
+      - '.github/workflows/_build-image.yml'
+      - '.github/actions/registry-login/**'
+
+concurrency:
+  # One publishing run at a time and never cancelled: a half-published pair of tags helps nobody.
+  group: base-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    name: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        env:
+          ONLY: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          if [[ -n $ONLY ]]; then
+            [[ -f docker/base/$ONLY/Dockerfile ]] || { echo "::error::docker/base/$ONLY/Dockerfile does not exist"; exit 1; }
+            matrix=$(jq -cn --arg i "$ONLY" '[$i]')
+          else
+            matrix=$(find docker/base -mindepth 2 -maxdepth 2 -name Dockerfile -printf '%h\n' | xargs -n1 basename | sort | jq -R . | jq -sc .)
+          fi
+          [[ $matrix != '[]' ]] || { echo "::error::no docker/base/<name>/Dockerfile found"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "images: $matrix"
+
+  publish:
+    needs: images
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.images.outputs.matrix) }}
+    uses: ./.github/workflows/_build-image.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image: ${{ matrix.image }}
+      push: true
+      no-cache: ${{ github.event_name == 'schedule' || inputs.no-cache == true }}
+      ca-bundle-version: ${{ inputs.ca-bundle-version || '' }}
