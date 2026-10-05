@@ -99,7 +99,9 @@ jobs:
     uses: ./.github/workflows/_build-image.yml
     permissions:
       contents: read
-      packages: read
+      # The called job declares `packages: write` (it is the one job that can push); the grant must cover
+      # it even though a pull-request call never pushes. A fork's token is read-only regardless.
+      packages: write
     with:
       image: ${{ matrix.image }}
       push: false

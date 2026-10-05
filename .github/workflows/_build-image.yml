@@ -8,7 +8,10 @@
 # published) and by base-image.yml (push: true — main, weekly, manual). The image repository is derived from
 # platform.yml: <registry>/<projects[0].name>/<image>. The build context is the directory holding the CA
 # bundle (docker/ca); the Dockerfile is docker/base/<image>/Dockerfile.
-# The caller grants `packages: write` to publish (`packages: read` is enough for a pull request).
+# The build job asks for `packages: write` itself (a called workflow's top-level `permissions` would otherwise
+# leave the token without any `packages` scope, and GHCR refuses to create the packages: "installation not
+# allowed to Create organization package"); the caller must grant at least that much, as the proven
+# _docker-publish.yml / _gradle-build.yml of the apps repository do.
 name: _build-image
 
 on:
@@ -50,6 +53,9 @@ jobs:
     name: ${{ inputs.image }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # pull-request calls never push (push: false); the scope is unused there
     outputs:
       image: ${{ steps.push.outputs.image }}
       tag: ${{ steps.tag.outputs.tag }}
